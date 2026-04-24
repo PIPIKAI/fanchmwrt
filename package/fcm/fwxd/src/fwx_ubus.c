@@ -3783,7 +3783,9 @@ struct json_object *fwx_api_get_top_users(struct json_object *req_obj) {
         }
     }
 
-    user_traffic_sort_t user_traffic_list[1024];
+    user_traffic_sort_t *user_traffic_list = (user_traffic_sort_t *)malloc(1024 * sizeof(user_traffic_sort_t));
+    if (!user_traffic_list)
+        return fwx_gen_api_response_data(API_CODE_ERROR, NULL);
     int user_count = 0;
     u_int32_t today = get_today_start_timestamp();
 
@@ -3871,8 +3873,10 @@ struct json_object *fwx_api_get_top_users(struct json_object *req_obj) {
     int return_count = (user_count < limit) ? user_count : limit;
 
     struct json_object *data_obj = json_object_new_object();
-    if (!data_obj)
+    if (!data_obj) {
+        free(user_traffic_list);
         return fwx_gen_api_response_data(API_CODE_ERROR, NULL);
+    }
 
     json_object_object_add(data_obj, "period", json_object_new_int(period));
     json_object_object_add(data_obj, "total_count", json_object_new_int(user_count));
@@ -3880,6 +3884,7 @@ struct json_object *fwx_api_get_top_users(struct json_object *req_obj) {
     struct json_object *users_array = json_object_new_array();
     if (!users_array) {
         json_object_put(data_obj);
+        free(user_traffic_list);
         return fwx_gen_api_response_data(API_CODE_ERROR, NULL);
     }
     for (i = 0; i < return_count; i++) {
@@ -3897,6 +3902,7 @@ struct json_object *fwx_api_get_top_users(struct json_object *req_obj) {
     }
     json_object_object_add(data_obj, "users", users_array);
 
+    free(user_traffic_list);
     return fwx_gen_api_response_data(API_CODE_SUCCESS, data_obj);
 }
 
