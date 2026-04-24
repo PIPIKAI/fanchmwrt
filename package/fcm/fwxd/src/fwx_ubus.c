@@ -3763,6 +3763,144 @@ struct json_object *fwx_api_get_daily_top_users(struct json_object *req_obj) {
 }
 
 
+struct json_object *fwx_api_get_top_users(struct json_object *req_obj) {
+    int i, hour, day;
+    int period = 1;
+    int limit = 8;
+
+    if (req_obj) {
+        struct json_object *period_obj = json_object_object_get(req_obj, "period");
+        struct json_object *limit_obj = json_object_object_get(req_obj, "limit");
+        if (period_obj) {
+            int p = json_object_get_int(period_obj);
+            if (p == 1 || p == 3 || p == 7 || p == 30)
+                period = p;
+        }
+        if (limit_obj) {
+            int l = json_object_get_int(limit_obj);
+            if (l > 0 && l <= 100)
+                limit = l;
+        }
+    }
+
+    user_traffic_sort_t user_traffic_list[1024];
+    int user_count = 0;
+    u_int32_t today = get_today_start_timestamp();
+
+    client_node_t *node = NULL;
+    list_for_each_entry(node, &client_list, client) {
+        if (user_count >= 1024)
+            break;
+
+        unsigned long long up_bytes = 0;
+        unsigned long long down_bytes = 0;
+
+        daily_hourly_stat_t *today_stat = get_today_stat(node);
+        if (today_stat) {
+            for (hour = 0; hour < HOURS_PER_DAY; hour++) {
+                up_bytes += today_stat->hourly_traffic[hour].up_bytes;
+                down_bytes += today_stat->hourly_traffic[hour].down_bytes;
+            }
+        }
+
+        if (period > 1) {
+            char mac_dirname[64] = {0};
+            int j;
+            for (j = 0; j < (int)sizeof(mac_dirname) - 1 && node->mac[j]; j++)
+                mac_dirname[j] = (node->mac[j] == ':') ? '_' : node->mac[j];
+
+            for (day = 1; day < period; day++) {
+                u_int32_t hist_date = today - (u_int32_t)day * SECONDS_PER_DAY;
+                char date_str[32] = {0};
+                time_t t = (time_t)hist_date;
+                struct tm *tm_info = localtime(&t);
+                if (!tm_info)
+                    continue;
+                strftime(date_str, sizeof(date_str), "%Y-%m-%d", tm_info);
+
+                char file_path[512] = {0};
+                snprintf(file_path, sizeof(file_path), "%s/%s/stats/hourly_%s.json",
+                         get_client_data_base_dir(), mac_dirname, date_str);
+
+                struct json_object *file_json = json_object_from_file(file_path);
+                if (!file_json)
+                    continue;
+
+                struct json_object *hourly_stats = json_object_object_get(file_json, "hourly_stats");
+                if (hourly_stats) {
+                    int n = json_object_array_length(hourly_stats);
+                    for (i = 0; i < n; i++) {
+                        struct json_object *hour_obj = json_object_array_get_idx(hourly_stats, i);
+                        if (!hour_obj)
+                            continue;
+                        struct json_object *traffic = json_object_object_get(hour_obj, "traffic");
+                        if (!traffic)
+                            continue;
+                        struct json_object *up_obj = json_object_object_get(traffic, "up_bytes");
+                        struct json_object *down_obj = json_object_object_get(traffic, "down_bytes");
+                        if (up_obj)
+                            up_bytes += (unsigned long long)json_object_get_int64(up_obj);
+                        if (down_obj)
+                            down_bytes += (unsigned long long)json_object_get_int64(down_obj);
+                    }
+                }
+                json_object_put(file_json);
+            }
+        }
+
+        if (up_bytes > 0 || down_bytes > 0) {
+            user_traffic_sort_t *user = &user_traffic_list[user_count];
+            strncpy(user->mac, node->mac, sizeof(user->mac) - 1);
+            user->mac[sizeof(user->mac) - 1] = '\0';
+            strncpy(user->ip, node->ip, sizeof(user->ip) - 1);
+            user->ip[sizeof(user->ip) - 1] = '\0';
+            strncpy(user->hostname, node->hostname, sizeof(user->hostname) - 1);
+            user->hostname[sizeof(user->hostname) - 1] = '\0';
+            strncpy(user->nickname, node->nickname, sizeof(user->nickname) - 1);
+            user->nickname[sizeof(user->nickname) - 1] = '\0';
+            user->up_bytes = up_bytes;
+            user->down_bytes = down_bytes;
+            user->total_bytes = up_bytes + down_bytes;
+            user_count++;
+        }
+    }
+
+    if (user_count > 0)
+        qsort(user_traffic_list, user_count, sizeof(user_traffic_sort_t), compare_user_traffic);
+
+    int return_count = (user_count < limit) ? user_count : limit;
+
+    struct json_object *data_obj = json_object_new_object();
+    if (!data_obj)
+        return fwx_gen_api_response_data(API_CODE_ERROR, NULL);
+
+    json_object_object_add(data_obj, "period", json_object_new_int(period));
+    json_object_object_add(data_obj, "total_count", json_object_new_int(user_count));
+
+    struct json_object *users_array = json_object_new_array();
+    if (!users_array) {
+        json_object_put(data_obj);
+        return fwx_gen_api_response_data(API_CODE_ERROR, NULL);
+    }
+    for (i = 0; i < return_count; i++) {
+        struct json_object *user_obj = json_object_new_object();
+        if (!user_obj)
+            continue;
+        json_object_object_add(user_obj, "mac", json_object_new_string(user_traffic_list[i].mac));
+        json_object_object_add(user_obj, "ip", json_object_new_string(user_traffic_list[i].ip));
+        json_object_object_add(user_obj, "hostname", json_object_new_string(user_traffic_list[i].hostname));
+        json_object_object_add(user_obj, "nickname", json_object_new_string(user_traffic_list[i].nickname));
+        json_object_object_add(user_obj, "up_bytes", json_object_new_int64(user_traffic_list[i].up_bytes));
+        json_object_object_add(user_obj, "down_bytes", json_object_new_int64(user_traffic_list[i].down_bytes));
+        json_object_object_add(user_obj, "total_bytes", json_object_new_int64(user_traffic_list[i].total_bytes));
+        json_object_array_add(users_array, user_obj);
+    }
+    json_object_object_add(data_obj, "users", users_array);
+
+    return fwx_gen_api_response_data(API_CODE_SUCCESS, data_obj);
+}
+
+
 typedef struct active_user_sort {
     char mac[MAX_MAC_LEN];
     char ip[MAX_IP_LEN];
@@ -4655,6 +4793,7 @@ struct json_object *fwx_api_get_all_users(struct json_object *req_obj);
 struct json_object *fwx_api_get_oaf_status(struct json_object *req_obj);
 struct json_object *fwx_api_visit_list(struct json_object *req_obj);
 struct json_object *fwx_api_get_device_list(struct json_object *req_obj);
+struct json_object *fwx_api_get_top_users(struct json_object *req_obj);
 struct json_object *fwx_api_get_dashboard_param(struct json_object *req_obj);
 struct json_object *fwx_api_set_dashboard_param(struct json_object *req_obj);
 
@@ -4669,6 +4808,7 @@ static fwx_api_node_t fwx_api_node_list[] = {
     {"get_global_app_type_stats", fwx_api_get_global_app_type_stats, 0, FWX_API_METHOD_GET},
     {"get_global_traffic_stats", fwx_api_get_global_traffic_stats, 0, FWX_API_METHOD_GET},
     {"get_daily_top_users", fwx_api_get_daily_top_users, 0, FWX_API_METHOD_GET},
+    {"get_top_users", fwx_api_get_top_users, 0, FWX_API_METHOD_GET},
     {"get_active_users", fwx_api_get_active_users, 0, FWX_API_METHOD_GET},
     {"get_filter_rules", fwx_api_get_filter_rules, 0, FWX_API_METHOD_GET},
     {"add_filter_rule", fwx_api_add_filter_rule, 1, FWX_API_METHOD_POST},
